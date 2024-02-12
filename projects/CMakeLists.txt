@@ -1,0 +1,3 @@
+add_subdirectory(garage_door)
+add_subdirectory(garden_bed)
+add_subdirectory(garden_shed)

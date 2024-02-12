@@ -1,0 +1,3 @@
+add_subdirectory(ntp)
+add_subdirectory(tcp_client)
+add_subdirectory(sparkplug_client)
