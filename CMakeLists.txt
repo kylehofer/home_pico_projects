@@ -42,7 +42,6 @@ set(PICO_BOARD pico_w)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 
-# set(WIFI_PASSWORD "gnN&E*yx*59lo3ZAWRICpEMca$UFFkNxft28Mid6ehjoxMzjZaUC0gPL6YeVm9" CACHE INTERNAL "Wifi Password")
 set(WIFI_SSID "${WIFI_SSID}" CACHE INTERNAL "Wifi SSID")
 set(WIFI_PASSWORD "${WIFI_PASSWORD}" CACHE INTERNAL "Wifi Password")
 set(BROKER_ADDRESS "${BROKER_ADDRESS}" CACHE INTERNAL "Broker Address")
@@ -56,8 +55,6 @@ set(CPP_SPARKPLUG_PAHO_SYNC OFF)
 set(CPP_SPARKPLUG_PAHO_ASYNC OFF)
 set(FETCH_REMOTE OFF)
 
-# include_directories("/home/kyle/.pico-sdk/sdk/2.1.1/src/common/pico_base_headers/include")
-# include_directories("/home/kyle/.pico-sdk/sdk/2.1.1/src/common/pico_stdlib_headers/include")
 IF(FETCH_REMOTE)
     CPMAddPackage(
         cpp_sparkplug
