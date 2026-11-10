@@ -35,7 +35,6 @@
 #include "door_control.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
-#include "hardware/adc.h"
 #include <stdio.h>
 
 // Timers
@@ -51,8 +50,6 @@
 #define MAX_DOOR_VALUE 0xFFFF
 
 #define MAX_TIME 0xFFFFFFFF
-
-#define DOOR_IDENTIFIER 0b10000000
 
 #define LOW 0
 #define HIGH 1
@@ -85,21 +82,16 @@ DoorControl door_control_initialize(DoorControl *door_control, int16_t min, int1
     gpio_init(RELAY_PIN);
     gpio_set_dir(RELAY_PIN, GPIO_OUT);
 
-    adc_gpio_init(POTENTIOMETER_PIN);
-    adc_select_input(0); // adc 0 is pin 26
-
-    uint16_t initialValue = adc_read();
-
     door_control->time_stamp = time_us_32();
 
     *door_control = (DoorControl){
         .current_state = DOOR_IDLE,
         .desired_state = DOOR_IDLE,
         .result = NONE,
-        .current_position = initialValue,
-        .desired_position = initialValue,
-        .position_min = min,
-        .position_max = max,
+        .current_position = 0,
+        .desired_position = 0,
+        .position_closed = min,
+        .position_open = max,
         .mean_position_delta = 0,
         .relay_output = 0,
         .time_stamp = 0,
@@ -109,41 +101,6 @@ DoorControl door_control_initialize(DoorControl *door_control, int16_t min, int1
         .hold_transition = 0};
 
     return *door_control;
-}
-
-/**
- * Sets the targeted position for the garage door.
- *
- * @param door_control a pointer to the door control struct
- * @param position 0-100 value for the position of the garage door
- */
-void door_control_set_position(DoorControl *door_control, uint8_t position)
-{
-    door_control->desired_position = linear_map(position, 0, 100, door_control->position_min, door_control->position_max);
-    door_control->desired_state = ACTIVE;
-    door_control->result = NONE;
-}
-
-/**
- * Sets the minimum position of the garage door to the current position being read.
- *
- * @param door_control a pointer to the door control struct
- * @return The position set as minimum
- */
-uint16_t door_control_calibrate_min_position(DoorControl *door_control)
-{
-    return door_control->position_min = (door_control->current_position + DOOR_THRESHOLD);
-}
-
-/**
- * Sets the maximum position of the garage door to the current position being read.
- *
- * @param door_control a pointer to the door control struct
- * @return The position set as maximum
- */
-uint16_t door_control_calibrate_max_position(DoorControl *door_control)
-{
-    return door_control->position_max = (door_control->current_position - DOOR_THRESHOLD);
 }
 
 /**
@@ -160,12 +117,23 @@ DoorData door_control_get(DoorControl *door_control)
     return (DoorData){
         .position = linear_map(
             door_control->current_position,
-            door_control->position_min,
-            door_control->position_max,
+            door_control->position_closed,
+            door_control->position_open,
             0,
             100),
         .state = (uint8_t)door_control->current_state,
         .result = (uint8_t)door_control->result};
+}
+
+/**
+ * @brief Trigger the door control relay
+ *
+ * @param door_control a pointer to the door control struct
+ */
+void door_control_trigger(DoorControl *door_control)
+{
+    door_control->desired_state = TRIGGER;
+    door_control->result = NONE;
 }
 
 /**
@@ -189,78 +157,21 @@ int door_control_execute(DoorControl *door_control)
         door_control->time_stamp = time_us_32() + DOOR_SAMPLE_RATE;
     }
 
-    uint16_t potentiometer_position = adc_read();
-    int16_t difference = door_control->current_position - potentiometer_position;
-    int8_t is_moving = door_control->mean_position_delta > DELTA_THRESHOLD || door_control->mean_position_delta < -DELTA_THRESHOLD;
-
-    // Really rough two point average to monitor if the door is moving
-    door_control->mean_position_delta = (door_control->mean_position_delta + difference) >> 1;
-
     switch (door_control->current_state)
     {
-    case START: // Waiting to start moving. The door is moving once the moving threshold is met for enough polls
-        if (is_moving)
-        {
-            if (--door_control->stablize_count == 0)
-            {
-                door_control->desired_state =
-                    (door_control->mean_position_delta < 0 && door_control->current_position < door_control->desired_position) ||
-                            (door_control->mean_position_delta > 0 && door_control->current_position > door_control->desired_position)
-                        ? MONITOR
-                        : ACTIVE;
-            }
-        }
-        else
-        {
-            door_control->stablize_count = STABLIZE_COUNT_MAX;
-            if (timestamp_elapsed(door_control->command_time, DOOR_COMMAND_DELAY))
-                door_control->desired_state = ACTIVE;
-        }
-        break;
-    case STOP: // Waiting to stop moving. The door is moving once the stopping threshold is met for enough polls
-        if (!is_moving)
-        {
-            if (--door_control->stablize_count == 0)
-            {
-                door_control->desired_state = ACTIVE;
-            }
-        }
-        else
-        {
-            door_control->stablize_count = 8;
-        }
-        break;
-    case MONITOR: // Monitoring movement. Stop if the door reaches the targeted position. Stop control if unexpected behaviour occurs (e.g. door unexpectably stops).
-        if (door_control->current_position > (door_control->desired_position - DOOR_THRESHOLD) &&
-            door_control->current_position < (door_control->desired_position + DOOR_THRESHOLD))
-        {
-            door_control->desired_state = door_control->desired_position > door_control->position_min && door_control->desired_position < door_control->position_max ? STOP : DOOR_IDLE;
-            door_control->result = SUCCESS;
-        }
-        else if ((door_control->mean_position_delta > 0 && door_control->current_position < door_control->desired_position) ||
-                 (door_control->mean_position_delta < 0 && door_control->current_position > door_control->desired_position))
-        {
-            door_control->desired_state = DOOR_IDLE;
-            door_control->result = FAIL;
-        }
-        break;
-    case ACTIVE: // The door is active. Will start movement if the desired position is different from the current position.
-        door_control->desired_state =
-            door_control->current_position > (door_control->desired_position - DOOR_THRESHOLD) &&
-                    door_control->current_position < (door_control->desired_position + DOOR_THRESHOLD)
-                ? DOOR_IDLE
-                : START;
-        break;
+    case TRIGGER:
+    {
+        door_control->desired_state = DOOR_IDLE;
+        door_control->result = SUCCESS;
+    }
     default:
         break;
     }
 
-    door_control->current_position = potentiometer_position;
-
     // State change
     if (door_control->desired_state != door_control->current_state)
     {
-        if (door_control->desired_state == START || door_control->desired_state == STOP)
+        if (door_control->desired_state == TRIGGER)
         {
             gpio_put(RELAY_PIN, door_control->relay_output = HIGH);
             door_control->command_time = time_us_32() + DOOR_COMMAND_DELAY;

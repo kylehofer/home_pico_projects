@@ -29,8 +29,8 @@
  * HISTORY:
  */
 
-#ifndef VICTRONPARSER
-#define VICTRONPARSER
+#ifndef PROJECTS_GARDEN_SHED_SRC_VICTRONPARSER
+#define PROJECTS_GARDEN_SHED_SRC_VICTRONPARSER
 
 #include "Fields.h"
 #ifndef __AVR__
@@ -40,17 +40,22 @@
 #endif // __AVR__
 
 #include "Device.h"
+#include "metrics/simple/DoubleMetric.h"
 #include "metrics/simple/Int32Metric.h"
 #include "metrics/simple/Int16Metric.h"
 #include "metrics/simple/Int8Metric.h"
 #include "metrics/simple/UInt8Metric.h"
 #include "metrics/simple/StringMetric.h"
 #include "metrics/simple/BooleanMetric.h"
+#include "metrics/simple/FixedStringMetric.h"
+#include "properties/simple/FixedStringProperty.h"
+#include "properties/simple/UInt8Property.h"
+#include "properties/complex/PropertySet.h"
+
+using namespace Sparkplug;
 
 // Max length of a Victron Field Label
 #define MAX_LABEL_LENGTH 8
-// Max length of a Victron Field Value
-#define MAX_FIELD_LENGTH 32
 // Maximum number of fields that in a single block with a checksum
 #define MAX_FIELDS_COUNT 22
 
@@ -86,34 +91,76 @@ public:
 class VictronParser
 {
 private:
-    VictronState state;
+    VictronState state = VictronState::IDLE;
     bool initialized;
     int8_t checksum;
     LabelToBuffer_u labelData;
     int labelIndex;
     char fieldData[MAX_FIELD_LENGTH];
     int fieldIndex;
-    Field *fields[MAX_FIELDS_COUNT];
+    Field fields[MAX_FIELDS_COUNT];
     void (*fieldHandlerFunc)(uint32_t, void *, size_t);
     VictronFieldHandler *fieldHandlerClass;
     int fieldCount;
 
     Device device;
-    std::shared_ptr<Int32Metric> batteryVoltage;
-    std::shared_ptr<Int32Metric> panelVoltage;
-    std::shared_ptr<Int16Metric> current;
-    std::shared_ptr<Int16Metric> yieldToday;
-    std::shared_ptr<Int16Metric> yieldYesterday;
-    std::shared_ptr<Int16Metric> maxPowerToday;
-    std::shared_ptr<Int16Metric> maxPowerYesterday;
-    std::shared_ptr<Int16Metric> daySequence;
-    std::shared_ptr<UInt8Metric> operationState;
-    std::shared_ptr<Int8Metric> errorState;
-    std::shared_ptr<Int8Metric> trackerOperationMode;
-    std::shared_ptr<BooleanMetric> loadActive;
-    std::shared_ptr<StringMetric> productId;
-    std::shared_ptr<StringMetric> firmware;
-    std::shared_ptr<StringMetric> serialNumber;
+    Int32Metric batteryVoltage = Int32Metric("batteryVoltage", 0);
+    Int32Metric panelVoltage = Int32Metric("panelVoltage", 0);
+    Int16Metric current = Int16Metric("current", 0);
+    DoubleMetric power = DoubleMetric("power", 0.0);
+    Int16Metric yieldToday = Int16Metric("yieldToday", 0);
+    Int16Metric yieldYesterday = Int16Metric("yieldYesterday", 0);
+    Int16Metric maxPowerToday = Int16Metric("maxPowerToday", 0);
+    Int16Metric maxPowerYesterday = Int16Metric("maxPowerYesterday", 0);
+    Int16Metric daySequence = Int16Metric("daySequence", 0);
+    UInt8Metric operationState = UInt8Metric("operationState", 0);
+    Int8Metric errorState = Int8Metric("errorState", 0);
+    Int8Metric trackerOperationMode = Int8Metric("trackerOperationMode", 0);
+    BooleanMetric loadActive = BooleanMetric("loadActive", 0);
+    FixedStringMetric<32> productId = FixedStringMetric<32>("productId", "");
+    FixedStringMetric<32> firmware = FixedStringMetric<32>("firmware", "");
+    FixedStringMetric<32> serialNumber = FixedStringMetric<32>("serialNumber", "");
+
+    /** Properties */
+
+    FixedStringProperty<3> millivolts = FixedStringProperty<3>("unit", "mV");
+    FixedStringProperty<3> milliamps = FixedStringProperty<3>("unit", "mA");
+    FixedStringProperty<2> watts = FixedStringProperty<2>("unit", "W");
+
+    FixedStringProperty<7> activate = FixedStringProperty<7>("trueText", "Active");
+    FixedStringProperty<11> deactivate = FixedStringProperty<11>("falseText", "Deactivate");
+
+    PropertySet operationStateEnum = PropertySet("enum");
+    PropertySet errorStateEnum = PropertySet("enum");
+    PropertySet trackerOperationModeEnum = PropertySet("enum");
+
+    /** enums */
+    UInt8Property noError = UInt8Property("NO_ERROR", 0);
+    UInt8Property batteryVoltageTooHigh = UInt8Property("BATTERY_VOLTAGE_TOO_HIGH", 2);
+    UInt8Property chargerTemperatureTooHigh = UInt8Property("CHARGER_TEMPERATURE_TOO_HIGH", 17);
+    UInt8Property chargerOverCurrent = UInt8Property("CHARGER_OVER_CURRENT", 18);
+    UInt8Property chargerCurrentReversed = UInt8Property("CHARGER_CURRENT_REVERSED", 19);
+    UInt8Property bulkTimeExceeded = UInt8Property("BULK_TIME_EXCEEDED", 20);
+    UInt8Property currentSensorIssue = UInt8Property("CURRENT_SENSOR_ISSUE", 21);
+    UInt8Property terminalsOverheated = UInt8Property("TERMINALS_OVERHEATED", 26);
+    UInt8Property solarVoltageTooHigh = UInt8Property("SOLAR_VOLTAGE_TOO_HIGH", 33);
+    UInt8Property solarCurrentTooHigh = UInt8Property("SOLAR_CURRENT_TOO_HIGH", 34);
+    UInt8Property inputShutdownBatteryVoltage = UInt8Property("INPUT_SHUTDOWN_BATTERY_VOLTAGE", 38);
+    UInt8Property inputShutdownCurrent = UInt8Property("INPUT_SHUTDOWN_CURRENT", 39);
+    UInt8Property userSettingInvalid = UInt8Property("USER_SETTING_INVALID", 119);
+
+    UInt8Property off = UInt8Property("OFF", 0);
+    UInt8Property fault = UInt8Property("FAULT", 2);
+    UInt8Property bulk = UInt8Property("BULK", 3);
+    UInt8Property absorption = UInt8Property("ABSORPTION", 4);
+    UInt8Property floatProperty = UInt8Property("FLOAT", 5);
+    UInt8Property manualEqualize = UInt8Property("MANUAL_EQUALIZE", 7);
+    UInt8Property starting = UInt8Property("STARTING", 245);
+    UInt8Property autoEqualize = UInt8Property("AUTO_EQUALIZE", 247);
+    UInt8Property externalControl = UInt8Property("EXTERNAL_CONTROL", 252);
+
+    UInt8Property voltageCurrentLimited = UInt8Property("VOLTAGE_CURRENT_LIMITED", 1);
+    UInt8Property mppTrackerActive = UInt8Property("MPP_TRACKER_ACTIVE", 2);
 
     void configureSparkplug();
 
@@ -152,4 +199,4 @@ public:
     Device *getDevice();
 };
 
-#endif /* VICTRONPARSER */
+#endif /* PROJECTS_GARDEN_SHED_SRC_VICTRONPARSER */

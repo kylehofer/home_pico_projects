@@ -1,14 +1,19 @@
 
+#define DEBUGGING 1
+
 #include "pico/stdlib.h"
 #include <stdio.h>
-
 #include <PicoSparkplugClient.h>
+#include <DependencyExecutor.h>
+#include <PicoOta.h>
 
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
 #include "pico/util/queue.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
+#include "hardware/dma.h"
+#include "hardware/watchdog.h"
 
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
@@ -16,11 +21,15 @@
 #include "VictronParser.h"
 #include "Shed.h"
 
+#include <PicoWifi.h>
+#include <ElapsedTime.h>
+
 #include <Node.h>
 #include <Device.h>
 #include <metrics/simple/UInt8Metric.h>
 #include <metrics/simple/Int32Metric.h>
 #include <metrics/simple/DateTimeMetric.h>
+#include <metrics/simple/FixedStringMetric.h>
 
 #define UART_ID uart0
 #define BAUD_RATE 19200
@@ -33,11 +42,10 @@
 #define UART_RX_PIN 1
 
 #define ADDRESS BROKER_ADDRESS
+//
 #define GROUP_ID "Garden"
 #define NODE_ID "Shed"
 #define HOST_ID "Home"
-
-#define MAX_RETRIES 5000
 
 void setupUart()
 {
@@ -61,26 +69,12 @@ void setupUart()
     uart_set_fifo_enabled(UART_ID, true);
 }
 
-void wifi_connect()
-{
-    printf("Connecting to WiFi...\n");
-    if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000))
-    {
-        printf("failed to connect.\n");
-        return;
-    }
-    else
-    {
-        printf("WIFI Connected.\n");
-    }
-}
-
 void sparkplugExecute()
 {
     char clientId[40];
 
     Uri uri(ADDRESS);
-    sprintf(clientId, "garden_shed_%ld", get_rand_32());
+    sprintf(clientId, "garden_shed_%lu", get_rand_32());
 
     NodeOptions nodeOptions = {
         GROUP_ID,
@@ -103,56 +97,63 @@ void sparkplugExecute()
 
     Shed shed((Publishable *)&node);
 
+    FixedStringMetric<15> address("ipAddress", "");
+    FixedStringMetric<32> ssid("ssid", "");
+    Int32Metric rssi("rssi", 0);
+
+    node.addMetric(address);
+    node.addMetric(ssid);
+    node.addMetric(rssi);
+
+    PicoOta ota(&node);
+
     node.addDevice(victronParser.getDevice());
-    auto client = node.addClient<PicoSparkplugClient>(&clientOptions);
-    client->useNtpServer(NTP_ADDRESS, 123);
+    node.addClient<PicoSparkplugClient>(&clientOptions);
+
+    NtpClient ntpClient(NTP_ADDRESS, 123, 3600);
+    TimeManager::setInstance((TimeClient *)&ntpClient);
 
     node.enable();
 
+    PicoWifi wifi;
+
+    DependencyExecutor executor;
+    ElapsedTime timeHandler;
+
+    executor.addChain({
+        std::bind(&PicoWifi::execute, &wifi),
+        std::bind(&NtpClient::sync, &ntpClient),
+        [&node, &timeHandler, &address, &wifi, &rssi, &ssid]()
+        {
+#if PICO_CYW43_ARCH_POLL
+            cyw43_arch_poll();
+#endif
+            uint32_t elapsedTime = timeHandler.elapsed();
+            if (elapsedTime > 0)
+            {
+                address.setValue(wifi.getAddress());
+                ssid.setValue(wifi.getSsid());
+                rssi.setValue(wifi.getRssi());
+
+                node.execute(elapsedTime);
+            }
+
+            return true;
+        },
+        std::bind(&PicoOta::execute, &ota),
+    });
+
     while (true)
     {
-        wifi_connect();
-        while (cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_JOIN)
+        if (!executor.execute())
         {
-            printf("Wifi is connected\n");
-            uint32_t retries = 0;
-
-            while (!node.isActive() && retries++ < MAX_RETRIES)
-            {
-#if PICO_CYW43_ARCH_POLL
-                cyw43_arch_poll();
-#endif
-                sleep_ms(1);
-            }
-
-            if (retries >= MAX_RETRIES)
-            {
-                continue;
-            }
-
-            printf("Node is Active, starting Sparkplug execution\n");
-            uint32_t executeTime = 5;
-            while (node.isActive())
-            {
-                while (uart_is_readable(UART_ID))
-                {
-                    char character = uart_getc(UART_ID);
-                    victronParser.parse(&character, 1);
-                }
-
-                shed.sync();
-
-                node.execute(executeTime);
-                sleep_ms(executeTime);
-
-#if PICO_CYW43_ARCH_POLL
-                cyw43_arch_poll();
-#endif
-            }
-            printf("Node is no longer Active, checking wifi status\n");
         }
-        printf("WIFI not connected, waiting 5 seconds\n");
-        sleep_ms(5000);
+        while (uart_is_readable(UART_ID))
+        {
+            char character = uart_getc(UART_ID);
+            victronParser.parse(&character, 1);
+        }
+        shed.sync();
     }
 }
 
@@ -162,16 +163,7 @@ int main()
 
     setupUart();
 
-    if (cyw43_arch_init())
-    {
-        printf("failed to initialise\n");
-        return 1;
-    }
-    cyw43_arch_enable_sta_mode();
-
     sparkplugExecute();
-
-    cyw43_arch_deinit();
 
     return 0;
 }

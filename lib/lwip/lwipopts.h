@@ -16,15 +16,17 @@
 #ifndef LWIP_SOCKET
 #define LWIP_SOCKET 0
 #endif
-#if PICO_CYW43_ARCH_POLL
-#define MEM_LIBC_MALLOC 1
-#else
-// MEM_LIBC_MALLOC is incompatible with non polling versions
+// lwIP's heap is a fixed static block of MEM_SIZE bytes rather than malloc,
+// in every cyw43 arch (MEM_LIBC_MALLOC is incompatible with the non polling
+// ones anyway)
 #define MEM_LIBC_MALLOC 0
-#endif
 #define MEM_ALIGNMENT 4
-#define MEM_SIZE 4000
+// Holds a header for each queued TCP segment (PicoTcpClient's data stays in its
+// own ring), plus DHCP, DNS and UDP packets being built
+#define MEM_SIZE 6000
 #define MEMP_NUM_TCP_SEG 32
+// No-copy writes reference their data with one pool pbuf per queued piece
+#define MEMP_NUM_PBUF TCP_SND_QUEUELEN
 #define MEMP_NUM_ARP_QUEUE 10
 #define PBUF_POOL_SIZE 24
 #define LWIP_ARP 1
@@ -51,7 +53,9 @@
 #define LWIP_UDP 1
 #define LWIP_DNS 1
 #define LWIP_TCP_KEEPALIVE 1
-#define LWIP_NETIF_TX_SINGLE_PBUF 1
+// 0 lets tcp_write() send from caller memory without copying (PicoTcpClient's
+// transmit ring); the cyw43 driver copies chained pbufs itself
+#define LWIP_NETIF_TX_SINGLE_PBUF 0
 #define DHCP_DOES_ARP_CHECK 0
 #define LWIP_DHCP_DOES_ACD_CHECK 0
 

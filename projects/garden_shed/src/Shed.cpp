@@ -2,7 +2,7 @@
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 
-#define LIGHT_PIN 9
+#define LIGHT_PIN 20
 #define DOOR_SENSOR_PIN 3
 
 #define CLOCK 125000000

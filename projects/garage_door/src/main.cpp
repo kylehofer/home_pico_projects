@@ -1,25 +1,24 @@
-#include <string.h>
 #include <time.h>
 
 #include <PicoSparkplugClient.h>
 
 #include <Node.h>
 #include <Device.h>
-#include <metrics/simple/UInt8Metric.h>
 #include <metrics/simple/Int32Metric.h>
-#include <metrics/simple/DateTimeMetric.h>
+#include <metrics/simple/StringMetric.h>
+#include <properties/complex/PropertySet.h>
+#include <properties/simple/StringProperty.h>
 
 #include <NtpClient.h>
+#include <utils/TimeManager.h>
+
+#include <PicoWifi.h>
+#include <ElapsedTime.h>
+#include <DependencyExecutor.h>
+#include <PicoOta.h>
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
-#include "pico/multicore.h"
-#include "pico/util/queue.h"
-#include "hardware/gpio.h"
-#include "hardware/adc.h"
-
-#include "lwip/pbuf.h"
-#include "lwip/tcp.h"
 
 #include "door_control.h"
 
@@ -37,61 +36,22 @@
 
 #define MAX_RETRIES 5000
 
-static queue_t sparkplugQueue;
-static queue_t doorQueue;
-
-void wifi_connect()
-{
-
-    printf("Connecting to WiFi...\n");
-    if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000))
-    {
-        printf("failed to connect.\n");
-        return;
-    }
-    else
-    {
-        printf("WIFI Connected.\n");
-    }
-}
-
-void door_main()
-{
-
-    DoorControl doorControl;
-    DoorControl *doorControlPtr = &doorControl;
-    door_control_initialize(doorControlPtr, 220, 4095);
-
-    while (true)
-    {
-        if (!queue_is_empty(&sparkplugQueue))
-        {
-            uint8_t value;
-            queue_remove_blocking(&sparkplugQueue, &value);
-            door_control_set_position(doorControlPtr, value);
-        }
-
-        if (door_control_execute(doorControlPtr) && queue_is_empty(&doorQueue))
-        {
-
-            DoorData doorData = door_control_get(doorControlPtr);
-            queue_add_blocking(&doorQueue, &doorData);
-        }
-    }
-}
-
-void mqtt_test()
+void sparkplug()
 {
     char clientId[40];
 
     Uri uri(ADDRESS);
-    sprintf(clientId, "garage_door_%ld", get_rand_32());
+    sprintf(clientId, "garage_door_%lu", get_rand_32());
+
+    DoorControl doorControl;
+    DoorControl *doorControlPtr = &doorControl;
+    door_control_initialize(doorControlPtr, 0, 4096);
 
     NodeOptions nodeOptions = {
         GROUP_ID,
         NODE_ID,
         HOST_ID,
-        100,
+        5000,
         NODE_CONTROL_REBIRTH};
 
     ClientOptions clientOptions = {
@@ -104,74 +64,72 @@ void mqtt_test()
 
     Node node = Node(&nodeOptions);
 
-    auto position = UInt8Metric::create("position", 0);
+    PicoOta ota(&node);
 
-    position->setCommandCallback(
-        [](__attribute__((unused)) Metric *metric, org_eclipse_tahu_protobuf_Payload_Metric *payload)
+    std::shared_ptr<BooleanMetric> trigger;
+    std::shared_ptr<StringMetric> address;
+    std::shared_ptr<StringMetric> ssid;
+    std::shared_ptr<Int32Metric> rssi;
+
+    node.addMetrics({
+        trigger = BooleanMetric::create("trigger", false),
+        address = StringMetric::create("ipAddress", {'\0'}),
+        ssid = StringMetric::create("ssid", {'\0'}),
+        rssi = Int32Metric::create("rssi", 0),
+    });
+
+    rssi->addProperty(StringProperty::create("unit", "dBm"));
+
+    trigger->setCommandCallback(
+        [&doorControlPtr](__attribute__((unused)) Metric *metric, org_eclipse_tahu_protobuf_Payload_Metric *payload)
         {
-            if (queue_is_empty(&sparkplugQueue))
+            if (!payload->value.boolean_value)
             {
-                queue_add_blocking(&sparkplugQueue, &payload->value);
+                return;
             }
+            door_control_trigger(doorControlPtr);
         });
 
-    auto state = UInt8Metric::create("state", 0);
-    auto result = UInt8Metric::create("result", 0);
+    node.addClient<PicoSparkplugClient>(&clientOptions);
 
-    node.addMetric(position);
-    node.addMetric(state);
-    node.addMetric(result);
+    NtpClient ntpClient(NTP_ADDRESS, 123, 3600);
 
-    auto *client = node.addClient<PicoSparkplugClient>(&clientOptions);
-    client->useNtpServer(NTP_ADDRESS, 123);
+    TimeManager::setInstance((TimeClient *)&ntpClient);
 
     node.enable();
 
+    PicoWifi wifi;
+    DependencyExecutor executor;
+    ElapsedTime timeHandler;
+
+    executor.addChain({
+        std::bind(&PicoWifi::execute, &wifi),
+        std::bind(&NtpClient::sync, &ntpClient),
+        [&node, &timeHandler, &address, &wifi, &rssi, &ssid, &doorControlPtr]()
+        {
+            uint32_t elapsedTime = timeHandler.elapsed();
+            if (elapsedTime > 0)
+            {
+                address->setValue(wifi.getAddress());
+                ssid->setValue(wifi.getSsid());
+                rssi->setValue(wifi.getRssi());
+
+                node.execute(elapsedTime);
+            }
+
+            door_control_execute(doorControlPtr);
+
+            return true;
+        },
+        std::bind(&PicoOta::execute, &ota),
+    });
+
     while (true)
     {
-        wifi_connect();
-        while (cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_JOIN)
+
+        if (executor.execute())
         {
-            printf("Wifi is connected, checking ntp server\n");
-            uint32_t retries = 0;
-
-            while (!node.isActive() && retries++ < MAX_RETRIES)
-            {
-#if PICO_CYW43_ARCH_POLL
-                cyw43_arch_poll();
-#endif
-                sleep_ms(1);
-            }
-
-            if (retries >= MAX_RETRIES)
-            {
-                continue;
-            }
-
-            uint32_t executeTime = 5;
-            while (node.isActive())
-            {
-                if (!queue_is_empty(&doorQueue))
-                {
-                    DoorData value;
-                    queue_remove_blocking(&doorQueue, &value);
-                    position->setValue(value.position);
-                    state->setValue(value.state);
-                    result->setValue(value.result);
-                }
-
-                node.execute(executeTime);
-
-                sleep_ms(executeTime);
-
-#if PICO_CYW43_ARCH_POLL
-                cyw43_arch_poll();
-#endif
-            }
-            printf("Node is no longer Active, checking wifi status\n");
         }
-        printf("WIFI not connected, waiting 5 seconds\n");
-        sleep_ms(5000);
     }
 }
 
@@ -179,21 +137,7 @@ int main()
 {
     stdio_init_all();
 
-    queue_init(&sparkplugQueue, sizeof(uint8_t), 1);
-    queue_init(&doorQueue, sizeof(DoorData), 1);
-
-    adc_init();
-
-    multicore_launch_core1(door_main);
-
-    if (cyw43_arch_init())
-    {
-        printf("failed to initialise\n");
-        return 1;
-    }
-    cyw43_arch_enable_sta_mode();
-
-    mqtt_test();
+    sparkplug();
 
     cyw43_arch_deinit();
 

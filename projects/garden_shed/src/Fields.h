@@ -32,6 +32,9 @@
 #ifndef FIELDS
 #define FIELDS
 
+// Max length of a Victron Field Value
+#define MAX_FIELD_LENGTH 32
+
 #include "enum.h"
 
 #ifdef __AVR__
@@ -82,9 +85,14 @@ class Field
 private:
     uint32_t id;
     size_t size;
-    void *data;
+    char data[MAX_FIELD_LENGTH];
 
 public:
+    Field() : id(0), size(0)
+    {
+        memset(this->data, 0, MAX_FIELD_LENGTH);
+    }
+
     /**
      * @brief Construct a new Field object
      *
@@ -93,8 +101,8 @@ public:
     template <typename T>
     Field(uint32_t id, T data) : id(id), size(sizeof(T))
     {
-        this->data = malloc(sizeof(T));
-        *((T *)this->data) = data;
+        memset(this->data, 0, MAX_FIELD_LENGTH);
+        memcpy(this->data, &data, sizeof(T));
     };
 
     /**
@@ -105,14 +113,14 @@ public:
     template <typename T>
     Field(uint32_t id, T *data, size_t size) : id(id)
     {
-        this->data = malloc(size);
+        // this->data = malloc(size);
         this->size = size;
+        memset(this->data, 0, MAX_FIELD_LENGTH);
         memcpy(this->data, data, size);
     };
 
-    ~Field()
-    {
-        free(data);
+    ~Field() {
+        // free(data);
     };
 
     /**
@@ -123,6 +131,12 @@ public:
     uint32_t getId() { return id; };
     void *getData() { return data; };
     size_t getSize() { return size; };
+    void clear()
+    {
+        memset(this->data, 0, MAX_FIELD_LENGTH);
+        size = 0;
+        id = 0;
+    };
 };
 
 #endif /* FIELDS */

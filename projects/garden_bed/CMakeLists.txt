@@ -10,10 +10,14 @@ target_include_directories(pico_garden_bed PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(pico_garden_bed
     pico_cyw43_arch_lwip_poll
     pico_stdlib
-    hardware_adc
     pico_sparkplug_client
     pico_ntp_client
     pico_multicore
+    hardware_gpio
+    hardware_pwm
+    dependency_executor
+    elapsed_time
+    pico_wifi
 )
 
 target_compile_definitions(pico_garden_bed PRIVATE
@@ -27,3 +31,6 @@ pico_add_extra_outputs(pico_garden_bed)
 pico_enable_stdio_usb(pico_garden_bed 1)
 
 pico_enable_stdio_uart(pico_garden_bed 0)
+
+# Links the OTA helper and builds picowota_pico_garden_bed.uf2 for the first flash
+pico_ota_enable(pico_garden_bed)

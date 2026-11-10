@@ -1,7 +1,7 @@
 /*
- * File: Client.h
- * Project: pico_tcp_client
- * Created Date: Thursday December 29th 2022
+ * File: VindriktningParser.h
+ * Project: gardener
+ * Created Date: Monday November 7th 2022
  * Author: Kyle Hofer
  *
  * MIT License
@@ -29,26 +29,14 @@
  * HISTORY:
  */
 
-#ifndef CLIENT
-#define CLIENT
+#ifndef PROJECTS_VINDRIKTNING_SRC_VindriktningParser
+#define PROJECTS_VINDRIKTNING_SRC_VindriktningParser
 
-#include <stdlib.h>
-#include <stdint.h>
+#include <Publishable.h>
+using namespace Sparkplug;
 
-/**
- * @brief Interface for representing a communication client
- */
-class Client
-{
-public:
-    virtual int connect(const char *host, uint16_t port) = 0;
-    virtual size_t write(uint8_t) = 0;
-    virtual size_t write(const void *buffer, size_t size) = 0;
-    virtual int available() = 0;
-    virtual int read(void *buffer, size_t size) = 0;
-    virtual void stop() = 0;
-    virtual uint8_t connected() = 0;
-    virtual void sync() = 0;
-};
+void startParser();
+void syncParser();
+void parserConfig(Publishable *);
 
-#endif /* CLIENT */
+#endif /* PROJECTS_VINDRIKTNING_SRC_VindriktningParser */

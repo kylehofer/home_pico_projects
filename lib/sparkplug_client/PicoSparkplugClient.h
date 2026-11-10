@@ -29,27 +29,21 @@
  * HISTORY:
  */
 
-#ifndef __PICOSPARKPLUGCLIENT_H__
-#define __PICOSPARKPLUGCLIENT_H__
+#ifndef LIB_SPARKPLUG_CLIENT_PICOSPARKPLUGCLIENT
+#define LIB_SPARKPLUG_CLIENT_PICOSPARKPLUGCLIENT
 
 #include <clients/CppMqttClient.h>
 #include <NtpClient.h>
 #include <memory>
 #include "PicoTcpClient.h"
 
-class PicoSparkplugClient : public CppMqttClient
+using namespace Sparkplug;
+
+class PicoSparkplugClient : public Sparkplug::CppMqttClient
 {
 private:
     PicoTcpClient tcpClient;
-    unique_ptr<NtpClient> ntpClient;
-
-protected:
-    /**
-     * @brief Get the Client object
-     *
-     * @return Client*
-     */
-    virtual Client *getClient() override;
+    std::unique_ptr<NtpClient> ntpClient;
 
 public:
     /**
@@ -59,18 +53,6 @@ public:
      * @param options The options for configuring the MQTT Client
      */
     PicoSparkplugClient(ClientEventHandler *handler, ClientOptions *options);
-    virtual time_t getTime() override;
-
-    void useNtpServer(std::string address, int port);
-
-    /**
-     * @brief Used to synchronise the MQTT client.
-     * As the Pico Client is async this function does nothing.
-     *
-     */
-    void sync();
-
-    bool isConnected();
 };
 
-#endif // __PICOSPARKPLUGCLIENT_H__
+#endif /* LIB_SPARKPLUG_CLIENT_PICOSPARKPLUGCLIENT */

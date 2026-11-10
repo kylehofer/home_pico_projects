@@ -1,5 +1,4 @@
-.vscode/
 build/
-.env
-.envrc
+.vscode/*
 external/
+temp/

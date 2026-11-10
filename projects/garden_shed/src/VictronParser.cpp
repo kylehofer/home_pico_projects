@@ -30,9 +30,6 @@
  */
 
 #include "VictronParser.h"
-#include "properties/simple/StringProperty.h"
-#include "properties/simple/UInt8Property.h"
-#include "properties/complex/PropertySet.h"
 
 #include "Fields.h"
 #ifndef __AVR__
@@ -42,7 +39,7 @@ using namespace std;
 #include <Arduino.h>
 #endif // __AVR__
 
-// Character denoting the start of a new field
+// Character denoting the start of a Field
 #define START_CHARACTER '\n'
 // Character denoting the end of a field
 #define END_CHARACTER '\r'
@@ -58,80 +55,67 @@ VictronParser::VictronParser() : fieldHandlerFunc(NULL), fieldHandlerClass(NULL)
 
 void VictronParser::configureSparkplug()
 {
-    device.addMetrics({
-        batteryVoltage = Int32Metric::create("batteryVoltage", 0),
-        panelVoltage = Int32Metric::create("panelVoltage", 0),
-        current = Int16Metric::create("current", 0),
-        yieldToday = Int16Metric::create("yieldToday", 0),
-        yieldYesterday = Int16Metric::create("yieldYesterday", 0),
-        maxPowerToday = Int16Metric::create("maxPowerToday", 0),
-        maxPowerYesterday = Int16Metric::create("maxPowerYesterday", 0),
-        daySequence = Int16Metric::create("daySequence", 0),
-        operationState = UInt8Metric::create("operationState", 0),
-        errorState = Int8Metric::create("errorState", 0),
-        trackerOperationMode = Int8Metric::create("trackerOperationMode", 0),
-        loadActive = BooleanMetric::create("loadActive", 0),
-        productId = StringMetric::create("productId", ""),
-        firmware = StringMetric::create("firmware", ""),
-        serialNumber = StringMetric::create("serialNumber", ""),
-    });
 
-    batteryVoltage->addProperty(StringProperty::create("unit", "V"));
-    panelVoltage->addProperty(StringProperty::create("unit", "V"));
-    current->addProperty(StringProperty::create("unit", "A"));
+    device.addMetric(batteryVoltage);
+    device.addMetric(panelVoltage);
+    device.addMetric(current);
+    device.addMetric(power);
+    device.addMetric(yieldToday);
+    device.addMetric(yieldYesterday);
+    device.addMetric(maxPowerToday);
+    device.addMetric(maxPowerYesterday);
+    device.addMetric(daySequence);
+    device.addMetric(operationState);
+    device.addMetric(errorState);
+    device.addMetric(trackerOperationMode);
+    device.addMetric(loadActive);
+    device.addMetric(productId);
+    device.addMetric(firmware);
+    device.addMetric(serialNumber);
 
-    yieldToday->addProperty(StringProperty::create("unit", "W"));
-    yieldYesterday->addProperty(StringProperty::create("unit", "W"));
-    maxPowerToday->addProperty(StringProperty::create("unit", "W"));
-    maxPowerYesterday->addProperty(StringProperty::create("unit", "W"));
+    batteryVoltage.addProperty(millivolts);
+    panelVoltage.addProperty(millivolts);
+    current.addProperty(milliamps);
+    power.addProperty(watts);
 
-    device.addMetric(operationState = UInt8Metric::create("operationState", 0));
+    yieldToday.addProperty(watts);
+    yieldYesterday.addProperty(watts);
+    maxPowerToday.addProperty(watts);
+    maxPowerYesterday.addProperty(watts);
 
-    operationState->addProperty(
-        PropertySet::create("enum",
-                            {
-                                UInt8Property::create("OFF", 0),
-                                UInt8Property::create("FAULT", 2),
-                                UInt8Property::create("BULK", 3),
-                                UInt8Property::create("ABSORPTION", 4),
-                                UInt8Property::create("FLOAT", 5),
-                                UInt8Property::create("MANUAL_EQUALIZE", 7),
-                                UInt8Property::create("STARTING", 245),
-                                UInt8Property::create("AUTO_EQUALIZE", 247),
-                                UInt8Property::create("EXTERNAL_CONTROL", 252),
-                            }));
+    operationStateEnum.addProperty(off);
+    operationStateEnum.addProperty(fault);
+    operationStateEnum.addProperty(bulk);
+    operationStateEnum.addProperty(absorption);
+    operationStateEnum.addProperty(floatProperty);
+    operationStateEnum.addProperty(manualEqualize);
+    operationStateEnum.addProperty(starting);
+    operationStateEnum.addProperty(autoEqualize);
+    operationStateEnum.addProperty(externalControl);
 
-    errorState->addProperty(
-        PropertySet::create("enum",
-                            {
-                                UInt8Property::create("NO_ERROR", 0),
-                                UInt8Property::create("BATTERY_VOLTAGE_TOO_HIGH", 2),
-                                UInt8Property::create("CHARGER_TEMPERATURE_TOO_HIGH", 17),
-                                UInt8Property::create("CHARGER_OVER_CURRENT", 18),
-                                UInt8Property::create("CHARGER_CURRENT_REVERSED", 19),
-                                UInt8Property::create("BULK_TIME_EXCEEDED", 20),
-                                UInt8Property::create("CURRENT_SENSOR_ISSUE", 21),
-                                UInt8Property::create("TERMINALS_OVERHEATED", 26),
-                                UInt8Property::create("SOLAR_VOLTAGE_TOO_HIGH", 33),
-                                UInt8Property::create("SOLAR_CURRENT_TOO_HIGH", 34),
-                                UInt8Property::create("INPUT_SHUTDOWN_BATTERY_VOLTAGE", 38),
-                                UInt8Property::create("INPUT_SHUTDOWN_CURRENT", 39),
-                                UInt8Property::create("USER_SETTING_INVALID", 119),
-                            }));
+    operationState.addProperty(operationStateEnum);
 
-    trackerOperationMode->addProperty(
-        PropertySet::create("enum",
-                            {
-                                UInt8Property::create("OFF", 0),
-                                UInt8Property::create("VOLTAGE_CURRENT_LIMITED", 1),
-                                UInt8Property::create("MPP_TRACKER_ACTIVE", 2),
-                            }));
+    errorStateEnum.addProperty(noError);
+    errorStateEnum.addProperty(batteryVoltageTooHigh);
+    errorStateEnum.addProperty(chargerTemperatureTooHigh);
+    errorStateEnum.addProperty(chargerOverCurrent);
+    errorStateEnum.addProperty(chargerCurrentReversed);
+    errorStateEnum.addProperty(bulkTimeExceeded);
+    errorStateEnum.addProperty(currentSensorIssue);
+    errorStateEnum.addProperty(terminalsOverheated);
+    errorStateEnum.addProperty(solarVoltageTooHigh);
+    errorStateEnum.addProperty(solarCurrentTooHigh);
+    errorStateEnum.addProperty(inputShutdownBatteryVoltage);
+    errorStateEnum.addProperty(inputShutdownCurrent);
+    errorStateEnum.addProperty(userSettingInvalid);
 
-    loadActive->addProperties(
-        {
-            StringProperty::create("trueText", "Active"),
-            StringProperty::create("falseTest", "Deactive"),
-        });
+    errorState.addProperty(errorStateEnum);
+
+    trackerOperationModeEnum.addProperty(off);
+    trackerOperationModeEnum.addProperty(voltageCurrentLimited);
+    trackerOperationModeEnum.addProperty(mppTrackerActive);
+
+    trackerOperationMode.addProperty(trackerOperationModeEnum);
 }
 
 Device *VictronParser::getDevice()
@@ -139,8 +123,8 @@ Device *VictronParser::getDevice()
     return &device;
 }
 
-VictronParser::VictronParser(VictronFieldHandler *fieldHandlerClass) : fieldHandlerFunc(NULL), fieldHandlerClass(fieldHandlerClass), fieldCount(0){};
-VictronParser::VictronParser(void (*fieldHandlerFunc)(uint32_t, void *, size_t)) : fieldHandlerFunc(fieldHandlerFunc), fieldHandlerClass(NULL), fieldCount(0){};
+VictronParser::VictronParser(VictronFieldHandler *fieldHandlerClass) : fieldHandlerFunc(NULL), fieldHandlerClass(fieldHandlerClass), fieldCount(0) {};
+VictronParser::VictronParser(void (*fieldHandlerFunc)(uint32_t, void *, size_t)) : fieldHandlerFunc(fieldHandlerFunc), fieldHandlerClass(NULL), fieldCount(0) {};
 
 VictronParser::~VictronParser()
 {
@@ -151,7 +135,7 @@ void VictronParser::dumpFields()
 {
     for (int i = (fieldCount - 1); i >= 0; i--)
     {
-        delete fields[i];
+        fields[i].clear();
     }
 
     fieldCount = 0;
@@ -159,64 +143,66 @@ void VictronParser::dumpFields()
 
 void VictronParser::processFields()
 {
-    Field *field;
     for (int i = (fieldCount - 1); i >= 0; i--)
     {
-        field = fields[i];
+        Field *field = &fields[i];
         switch (field->getId())
         {
         case VictronId::VOLTAGE:
-            batteryVoltage->setValue(*((int32_t *)field->getData()));
+            batteryVoltage.setValue(*((int32_t *)field->getData()));
+            power.setValue((double)((int32_t)current.getValue() * batteryVoltage.getValue()) / 1000000);
             break;
         case VictronId::PANEL_VOLTAGE:
-            panelVoltage->setValue(*((int32_t *)field->getData()));
+            panelVoltage.setValue(*((int32_t *)field->getData()));
             break;
         case VictronId::CURRENT:
-            current->setValue(*((int32_t *)field->getData()));
+            current.setValue(*((int16_t *)field->getData()));
+            power.setValue((double)((int32_t)current.getValue() * batteryVoltage.getValue()) / 1000000.0);
             break;
         case VictronId::YIELD_TODAY:
-            yieldToday->setValue(*((int16_t *)field->getData()));
+            yieldToday.setValue(*((int16_t *)field->getData()));
             break;
         case VictronId::MAX_POWER_TODAY:
-            maxPowerToday->setValue(*((int16_t *)field->getData()));
+            maxPowerToday.setValue(*((int16_t *)field->getData()));
             break;
         case VictronId::YIELD_YESTERDAY:
-            yieldYesterday->setValue(*((int16_t *)field->getData()));
+            yieldYesterday.setValue(*((int16_t *)field->getData()));
             break;
         case VictronId::MAX_POWER_YESTERDAY:
-            maxPowerYesterday->setValue(*((int16_t *)field->getData()));
+            maxPowerYesterday.setValue(*((int16_t *)field->getData()));
             break;
         case VictronId::DAY_SEQUENCE:
-            daySequence->setValue(*((int8_t *)field->getData()));
+            daySequence.setValue(*((int8_t *)field->getData()));
             break;
         case VictronId::OPERATION_STATE:
-            operationState->setValue(*((uint8_t *)field->getData()));
+            operationState.setValue(*((uint8_t *)field->getData()));
             break;
         case VictronId::ERROR_STATE:
-            errorState->setValue(*((uint8_t *)field->getData()));
+            errorState.setValue(*((uint8_t *)field->getData()));
             break;
         case VictronId::TRACKER_OPERATION_MODE:
-            trackerOperationMode->setValue(*((uint8_t *)field->getData()));
+            trackerOperationMode.setValue(*((uint8_t *)field->getData()));
             break;
         case VictronId::LOAD:
-            loadActive->setValue(*((bool *)field->getData()));
-            break;
-        case VictronId::CHEC:
+            loadActive.setValue(*((bool *)field->getData()));
             break;
         case VictronId::PRODUCT_ID: // All Strings, Might implement in Modbus later
-            productId->setValue((char *)field->getData());
+            productId.setValue((char *)field->getData());
             break;
         case VictronId::FIRMWARE:
-            firmware->setValue((char *)field->getData());
+            firmware.setValue((char *)field->getData());
+            break;
         case VictronId::SERIAL_NUMBER:
-            serialNumber->setValue((char *)field->getData());
+            serialNumber.setValue((char *)field->getData());
+            break;
         case VictronId::OFF_REASON:
-
+        case VictronId::CHEC:
+        case VictronId::KSUM:
         default:
             break;
         }
 
-        delete field;
+        field->clear();
     }
 
     fieldCount = 0;
@@ -231,7 +217,6 @@ void VictronParser::parse(const char *buffer, int size)
         switch (state)
         {
         case VictronState::LABEL:
-            // cout << "LABEL\n";
             if (input == SPLIT_CHARACTER)
             {
                 state = VictronState::FIELD;
@@ -305,8 +290,7 @@ void VictronParser::processEntry()
     {
     case VictronId::VOLTAGE:
     case VictronId::PANEL_VOLTAGE:
-        fields[fieldCount] = new Field(labelData.lower, atol(fieldData));
-        fieldCount++;
+        fields[fieldCount++] = Field(labelData.lower, atol(fieldData));
         break;
     case VictronId::CURRENT:
     case VictronId::PANEL_POWER:
@@ -317,49 +301,50 @@ void VictronParser::processEntry()
     case VictronId::YIELD_YESTERDAY:
     case VictronId::MAX_POWER_YESTERDAY:
     case VictronId::DAY_SEQUENCE:
-        fields[fieldCount] = new Field(labelData.lower, atoi(fieldData));
-        fieldCount++;
+        fields[fieldCount++] = Field(labelData.lower, atoi(fieldData));
         break;
     case VictronId::OPERATION_STATE:
     case VictronId::ERROR_STATE:
     case VictronId::TRACKER_OPERATION_MODE:
-        fields[fieldCount] = new Field(labelData.lower, (int8_t)atoi(fieldData));
-        fieldCount++;
+        fields[fieldCount++] = Field(labelData.lower, (int8_t)atoi(fieldData));
         break;
     case VictronId::PRODUCT_ID:
     case VictronId::FIRMWARE:
     case VictronId::SERIAL_NUMBER:
-        fields[fieldCount] = new Field(labelData.lower, fieldData, fieldIndex + 1);
-        fieldCount++;
+        fields[fieldCount++] = Field(labelData.lower, fieldData, fieldIndex + 1);
+
         break;
     case VictronId::LOAD: // ON/OFF value
-        fields[fieldCount] = new Field(labelData.lower, (bool)(strcmp(fieldData, "ON") == 0));
-        fieldCount++;
+        fields[fieldCount++] = Field(labelData.lower, (bool)(strcmp(fieldData, "ON") == 0));
         break;
     case VictronId::CHEC:
         if (labelData.upper == VictronId::KSUM)
         {
-            fields[fieldCount] = new Field(labelData.lower, checksum);
-            fieldCount++;
-            // if (checksum == 0)
-            // {
-            //     processFields();
-            // }
-            // else
-            // {
-            //     dumpFields();
-            // }
-            processFields();
+            fields[fieldCount++] = Field(labelData.lower, checksum);
+            if (checksum == 0)
+            {
+                processFields();
+            }
+            else
+            {
+                dumpFields();
+            }
             checksum = 0;
         }
         break;
     case VictronId::OFF_REASON:
-    default:
         break;
-    }
+    default:
+        printf("Could not determine field: %lu\n", labelData.lower);
+        printf("Characters: ");
 
-    if (fieldCount > 0)
-    {
-        // processFields();
+        int i = 0;
+
+        while (labelData.buffer[i] > 0 && i < MAX_LABEL_LENGTH)
+        {
+            printf("%c", labelData.buffer[i++]);
+        }
+        printf("\n");
+        break;
     }
 }

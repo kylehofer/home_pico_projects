@@ -1,3 +1,6 @@
 add_subdirectory(ntp)
 add_subdirectory(tcp_client)
 add_subdirectory(sparkplug_client)
+add_subdirectory(wifi)
+add_subdirectory(ota)
+add_subdirectory(dependency_executor)

@@ -10,6 +10,7 @@ target_include_directories(pico_ntp_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/.
 target_link_libraries(pico_ntp_client
     pico_stdlib
     pico_cyw43_arch_lwip_poll
+    pico_sparkplug_client
 
     # pico_hardware_sync
 )

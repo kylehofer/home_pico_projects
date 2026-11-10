@@ -5,6 +5,8 @@
 #include "metrics/simple/UInt8Metric.h"
 #include "metrics/simple/BooleanMetric.h"
 
+using namespace Sparkplug;
+
 class Shed
 {
 private:

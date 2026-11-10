@@ -31,44 +31,9 @@
 
 #include "PicoSparkplugClient.h"
 
-Client *PicoSparkplugClient::getClient()
-{
-    return (Client *)&tcpClient;
-}
-
 PicoSparkplugClient::PicoSparkplugClient(ClientEventHandler *handler, ClientOptions *options) : CppMqttClient(handler, options)
 {
-}
-
-time_t PicoSparkplugClient::getTime()
-{
-    if (ntpClient)
-    {
-        return ntpClient->getTime();
-    }
-
-    return us_to_ms(time_us_64());
-}
-
-void PicoSparkplugClient::useNtpServer(std::string address, int port)
-{
-    ntpClient = NtpClient::create(address, port, 3600);
-}
-
-void PicoSparkplugClient::sync()
-{
-    if (ntpClient)
-    {
-        ntpClient->sync();
-    }
-    CppMqttClient::sync();
-}
-
-bool PicoSparkplugClient::isConnected()
-{
-    if (ntpClient)
-    {
-        return ntpClient->synced() && CppMqttClient::isConnected();
-    }
-    return CppMqttClient::isConnected();
+    // PicoTcpClient is also a TransmitBuffer, so MqttClient encodes packets
+    // straight into the ring lwIP sends from
+    setTransport(&tcpClient);
 }

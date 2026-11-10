@@ -10,16 +10,15 @@
 #include <string>
 #include <string.h>
 #include <memory>
+#include "utils/TimeManager.h"
 
-class NtpClient
+class NtpClient : Sparkplug::TimeClient
 {
 private:
-    ip_addr_t ntp_server_address;
+    ip_addr_t ntp_server_address = {.addr = IPADDR_NONE};
     bool dns_request_sent = false;
-    struct udp_pcb *ntp_pcb;
+    struct udp_pcb *ntp_pcb = nullptr;
     absolute_time_t syncStamp;
-    absolute_time_t ntp_test_time;
-    alarm_id_t ntp_resend_alarm;
 
     time_t hardwareOffset = 0;
 
@@ -29,12 +28,19 @@ private:
 
     struct Private;
 
-    void init();
     void request();
     void result(int status, time_t *result);
     void receive(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);
     void dnsFound(const char *hostname, const ip_addr_t *ipaddr);
+    bool isValidIPv4(std::string address, ip_addr_t &result);
     int64_t failed(alarm_id_t id);
+    void init();
+
+    /**
+     * @brief How long to wait for a reply before asking again: short until the
+     * first sync, longer after that.
+     */
+    uint32_t resendTime();
 
 protected:
 public:
@@ -43,13 +49,13 @@ public:
     {
     }
     static std::unique_ptr<NtpClient> create(std::string ntpServer, int port, size_t syncTime);
-    void sync();
+    bool sync();
     inline bool synced()
     {
-        return absolute_time_diff_us(get_absolute_time(), this->syncStamp) >= 0 && !this->dns_request_sent;
+        return hardwareOffset > 0;
     }
 
-    time_t getTime();
+    virtual time_t getTime() override;
 };
 
 #endif /* NTP_CLIENT */

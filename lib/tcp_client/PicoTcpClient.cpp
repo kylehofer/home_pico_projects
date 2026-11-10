@@ -31,338 +31,624 @@
 
 #include "PicoTcpClient.h"
 
-#include <functional>
+#include <string.h>
 #include <stdio.h>
-#include <lwipopts.h>
 
-#include <pico/stdlib.h>
-#include <pico/cyw43_arch.h>
-
-#include <lwip/pbuf.h>
-#include <lwip/tcp.h>
-
-#define DEBUGGING 1
-#ifdef DEBUGGING
-#define DEBUG(format, ...)     \
-    printf("PicoTcpClient: "); \
-    printf(format, ##__VA_ARGS__);
-#else
-#define DEBUG(out, ...)
+#if LWIP_DNS
+#include "lwip/dns.h"
 #endif
 
-#define POLL_TIME_S 5
+// Build with -DPICO_TCP_DEBUGGING to print connection events
+#if defined(PICO_TCP_DEBUGGING) && PICO_TCP_DEBUGGING
+#define PICO_TCP_LOG(format, ...) printf("PicoTcpClient: " format, ##__VA_ARGS__)
+#else
+#define PICO_TCP_LOG(format, ...) \
+    do                            \
+    {                             \
+    } while (0)
+#endif
 
-static DataBuffer *initializeDataBuffer(const void *buffer, size_t length)
+// tcp_poll() interval, in lwIP's 500 ms coarse timer ticks. Retries sends that
+// did not fit and times out closing connections.
+#define POLL_INTERVAL 2
+#define CLOSE_POLL_LIMIT ((PICO_TCP_CLOSE_TIMEOUT_S * 1000) / (POLL_INTERVAL * 500))
+
+#if PICO_TCP_ZERO_COPY_TRANSMIT
+// lwIP references the ring rather than copying it
+#define WRITE_FLAGS 0
+#else
+#define WRITE_FLAGS TCP_WRITE_FLAG_COPY
+#endif
+
+#if PICO_TCP_ZERO_COPY_TRANSMIT && !MEMP_MEM_MALLOC && (MEMP_NUM_PBUF < TCP_SND_QUEUELEN)
+#warning "PicoTcpClient: MEMP_NUM_PBUF < TCP_SND_QUEUELEN; no-copy sends will run out of pbufs before the send window is full"
+#endif
+
+static_assert(PICO_TCP_RECEIVE_PBUF_LIMIT >= 1, "PICO_TCP_RECEIVE_PBUF_LIMIT must be at least 1");
+static_assert(CLOSE_POLL_LIMIT >= 1 && CLOSE_POLL_LIMIT <= 255, "PICO_TCP_CLOSE_TIMEOUT_S is out of range");
+// Held data is acknowledged with tcp_recved() and measured by a pbuf's u16 tot_len
+static_assert(TCP_WND <= 0xFFFF, "PicoTcpClient needs TCP_WND to fit in 16 bits");
+
+/*
+ * lwIP callbacks. Every callback is cleared before arg stops being valid, but
+ * a NULL arg is still ignored.
+ */
+
+err_t PicoTcpClient::lwipConnected(void *arg, struct tcp_pcb *controlBlock, err_t errorCode)
 {
-    DataBuffer *dataBuffer;
-    dataBuffer = (DataBuffer *)malloc(sizeof(DataBuffer));
-
-    const uint8_t *data = (const uint8_t *)malloc(length);
-
-    dataBuffer->data = dataBuffer->position = data;
-    dataBuffer->length = length;
-    dataBuffer->next = NULL;
-
-    if (buffer != NULL)
+    PicoTcpClient *client = (PicoTcpClient *)arg;
+    if (client == NULL || controlBlock != client->activeBlock)
     {
-        memcpy((void *)dataBuffer->data, buffer, length);
+        return ERR_OK;
     }
-
-    return dataBuffer;
-}
-
-static DataBuffer *initializeDataBuffer(size_t length)
-{
-    return initializeDataBuffer(NULL, length);
-}
-
-// Declare all private member functions of SomeClass here
-struct PicoTcpClient::Private
-{
-    static err_t client_poll(void *data, tcp_pcb *controlBlock)
-    {
-        PicoTcpClient *client = (PicoTcpClient *)data;
-        return client->poll();
-    }
-
-    static err_t client_sent(void *data, tcp_pcb *controlBlock, uint16_t length)
-    {
-        PicoTcpClient *client = (PicoTcpClient *)data;
-        return client->sent(length);
-    }
-
-    static err_t client_receive(void *data, tcp_pcb *controlBlock, struct pbuf *payloadBuffer, err_t errorCode)
-    {
-        PicoTcpClient *client = (PicoTcpClient *)data;
-        return client->received(payloadBuffer, errorCode);
-    }
-
-    static void client_error(void *data, err_t errorCode)
-    {
-        PicoTcpClient *client = (PicoTcpClient *)data;
-        client->onError(errorCode);
-    }
-
-    static err_t client_connected(void *data, tcp_pcb *tcpControlBlock, err_t errorCode)
-    {
-        PicoTcpClient *client = (PicoTcpClient *)data;
-        return client->onConnected(errorCode);
-    }
-};
-
-err_t PicoTcpClient::writeDataBuffer(DataBuffer *buffer)
-{
-    DataBuffer *queue;
-    int availableLength;
-    err_t tcpCode = 0;
-
-    availableLength = tcp_sndbuf(tcpControlBlock);
-
-    queue = buffer;
-
-    while (availableLength > 0 && queue != NULL)
-    {
-        if (availableLength >= queue->length)
-        {
-            availableLength -= queue->length;
-            tcpCode = tcp_write(tcpControlBlock, queue->position, queue->length, TCP_WRITE_FLAG_COPY);
-            queue = queue->next;
-        }
-        else
-        {
-            queue->length -= availableLength;
-            tcpCode = tcp_write(tcpControlBlock, queue->position, availableLength, TCP_WRITE_FLAG_COPY);
-            queue->position += availableLength;
-            availableLength = 0;
-        }
-    }
-
-    switch (tcpCode)
-    {
-    case ERR_OK:
-        /* code */
-        tcp_output(tcpControlBlock);
-        break;
-    case ERR_MEM:
-        /* code */
-        break;
-    case ERR_CONN:
-        // TODO: Handle Not Connected
-        isConnected = false;
-        tcp_abort(tcpControlBlock);
-        return ERR_ABRT;
-        break;
-    case ERR_ARG:
-        // TODO: Handle Bad Args
-        break;
-    default:
-        break;
-    }
-
-    return tcpCode;
-}
-
-int PicoTcpClient::sent(uint16_t length)
-{
-    DataBuffer *temp;
-    uint16_t remaining = length;
-
-    while (remaining > 0 && writeQueue != NULL)
-    {
-        if (remaining >= writeQueue->length)
-        {
-            remaining -= writeQueue->length;
-
-            temp = writeQueue;
-            writeQueue = writeQueue->next;
-
-            free((void *)temp->data);
-            free(temp);
-        }
-        else
-        {
-            writeQueue->length -= remaining;
-            remaining = 0;
-        }
-    }
-
-    if (writeQueue != NULL)
-    {
-        writeDataBuffer(writeQueue);
-    }
-
+    // lwIP reports failures through the error callback; errorCode is ERR_OK
+    (void)errorCode;
+    PICO_TCP_LOG("Connected\n");
+    client->isConnected = true;
+    client->applyNoDelay(controlBlock);
     return ERR_OK;
 }
 
-err_t PicoTcpClient::received(void *data, err_t errorCode)
+err_t PicoTcpClient::lwipReceived(void *arg, struct tcp_pcb *controlBlock, struct pbuf *payload, err_t errorCode)
 {
-    struct pbuf *payloadBuffer = (struct pbuf *)data;
-
-    if (!payloadBuffer)
+    PicoTcpClient *client = (PicoTcpClient *)arg;
+    if (client == NULL)
     {
-        // TODO: Error
-        isConnected = false;
-        tcp_abort(tcpControlBlock);
-        return ERR_ABRT;
+        if (payload != NULL)
+        {
+            tcp_recved(controlBlock, payload->tot_len);
+            pbuf_free(payload);
+        }
+        return ERR_OK;
     }
-    cyw43_arch_lwip_check();
-    if (payloadBuffer->tot_len > 0)
-    {
-
-        DataBuffer *received;
-
-        received = initializeDataBuffer(payloadBuffer->tot_len);
-
-        if (received == NULL)
-        {
-            return ERR_MEM;
-        }
-
-        pbuf_copy_partial(payloadBuffer, (void *)received->data, payloadBuffer->tot_len, 0);
-        tcp_recved(tcpControlBlock, payloadBuffer->tot_len);
-
-        availableData += payloadBuffer->tot_len;
-        if (receiveQueue == NULL)
-        {
-            receiveQueue = received;
-        }
-        else
-        {
-            DataBuffer *tail = receiveQueue, *next = tail->next;
-            while (next != NULL)
-            {
-                tail = next;
-                next = tail->next;
-            }
-
-            tail->next = received;
-        }
-    }
-
-    pbuf_free(payloadBuffer);
-    return ERR_OK;
+    return client->onReceived(controlBlock, payload, errorCode);
 }
 
-err_t PicoTcpClient::onConnected(int errorCode)
+err_t PicoTcpClient::lwipSent(void *arg, struct tcp_pcb *controlBlock, u16_t length)
 {
-    if (errorCode != ERR_OK)
-    {
-        isConnected = false;
-        DEBUG("Connect failed %d\n", errorCode);
-        return errorCode;
-    }
-    DEBUG("Connect Success %d\n");
-    isConnected = true;
-    isConnecting = false;
-    waitingReply = false;
-    return ERR_OK;
+    PicoTcpClient *client = (PicoTcpClient *)arg;
+    return (client != NULL) ? client->onSent(controlBlock, length) : (err_t)ERR_OK;
 }
 
-void PicoTcpClient::onError(err_t errorCode)
+err_t PicoTcpClient::lwipPoll(void *arg, struct tcp_pcb *controlBlock)
 {
-    printf("Error!\n");
-    DEBUG("Error %d\n", errorCode);
-    switch (errorCode)
-    {
-    case ERR_ABRT:
-        /* code */
-        break;
-    case ERR_RST:
-        /* code */
-        break;
-
-    default:
-        break;
-    }
-    close();
-    waitingReply = false;
-    isConnected = false;
+    PicoTcpClient *client = (PicoTcpClient *)arg;
+    return (client != NULL) ? client->onPoll(controlBlock) : (err_t)ERR_OK;
 }
 
-err_t PicoTcpClient::poll()
+void PicoTcpClient::lwipError(void *arg, err_t errorCode)
 {
-    return ERR_OK;
+    // lwIP has already freed the connection
+    PICO_TCP_LOG("Connection error: %d\n", errorCode);
+    (void)errorCode;
+    if (arg != NULL)
+    {
+        ((PicoTcpClient *)arg)->onError();
+    }
+}
+
+void PicoTcpClient::lwipClosingError(void *arg, err_t errorCode)
+{
+    // The closing connection was reset or timed out; lwIP has freed it
+    PICO_TCP_LOG("Closing connection error: %d\n", errorCode);
+    (void)errorCode;
+    if (arg != NULL)
+    {
+        ((PicoTcpClient *)arg)->onClosingError();
+    }
+}
+
+void PicoTcpClient::lwipDnsFound(const char *hostname, const ip_addr_t *found, void *arg)
+{
+    if (arg != NULL)
+    {
+        ((PicoTcpClient *)arg)->onDnsFound(hostname, found);
+    }
 }
 
 PicoTcpClient::PicoTcpClient()
 {
+    ip_addr_set_zero(&address);
 }
 
 PicoTcpClient::~PicoTcpClient()
 {
-    close();
+    // lwIP must not touch the ring or this object once it is gone, so both
+    // connections are aborted rather than closed
+    cyw43_arch_lwip_begin();
+    resolving = false;
+    if (activeBlock != NULL)
+    {
+        struct tcp_pcb *controlBlock = activeBlock;
+        activeBlock = NULL;
+        dropReceived(NULL);
+        detach(controlBlock);
+        tcp_abort(controlBlock);
+    }
+    if (closingBlock != NULL)
+    {
+        abortClosing();
+    }
+    dropReceived(NULL);
+    cyw43_arch_lwip_end();
 }
 
-int PicoTcpClient::connect(const char *hostname, uint16_t port)
+/**
+ * Clears every callback so lwIP no longer calls into this object.
+ */
+void PicoTcpClient::detach(struct tcp_pcb *controlBlock)
 {
-    if (isConnected)
+    tcp_arg(controlBlock, NULL);
+    tcp_recv(controlBlock, NULL);
+    tcp_sent(controlBlock, NULL);
+    tcp_poll(controlBlock, NULL, 0);
+    tcp_err(controlBlock, NULL);
+}
+
+/**
+ * FNV-1a, to match a DNS answer to the request without keeping a copy of the
+ * name.
+ */
+uint32_t PicoTcpClient::hashName(const char *name)
+{
+    uint32_t hash = 2166136261u;
+    for (; name != NULL && *name != '\0'; name++)
     {
-        DEBUG("Already connected\n");
+        // DNS names are case insensitive
+        char character = *name;
+        if (character >= 'A' && character <= 'Z')
+        {
+            character = (char)(character - 'A' + 'a');
+        }
+        hash = (hash ^ (uint8_t)character) * 16777619u;
+    }
+    return hash;
+}
+
+size_t PicoTcpClient::unsentLength() const
+{
+    return transmitRing.pending() - transmitRing.unacknowledged();
+}
+
+/**
+ * Hands committed bytes from the ring to lwIP, as far as its send buffer and
+ * segment queue allow. Whatever is left is retried when the broker
+ * acknowledges data (onSent) or on the poll timer.
+ */
+void PicoTcpClient::sendPending(struct tcp_pcb *controlBlock)
+{
+    if (controlBlock == NULL)
+    {
+        return;
+    }
+
+    bool queued = false;
+    size_t length = 0;
+    const uint8_t *span;
+    // unsent() returns at most up to the ring's wrap, so wrapped data takes two
+    // rounds
+    while ((span = transmitRing.unsent(length)) != NULL)
+    {
+        size_t space = tcp_sndbuf(controlBlock);
+        if (space == 0)
+        {
+            break;
+        }
+        if (length > space)
+        {
+            length = space;
+        }
+        if (length > 0xFFFF)
+        {
+            length = 0xFFFF;
+        }
+
+        u8_t flags = WRITE_FLAGS;
+        if (length < unsentLength())
+        {
+            // More follows straight away; no PSH on this part
+            flags |= TCP_WRITE_FLAG_MORE;
+        }
+
+        // Without TCP_WRITE_FLAG_COPY the bytes must stay unchanged until
+        // acknowledged, which the ring guarantees: it frees them in onSent()
+        err_t result = tcp_write(controlBlock, span, (u16_t)length, flags);
+        if (result != ERR_OK)
+        {
+            // ERR_MEM: out of segments or pbufs for now
+            if (result != ERR_MEM)
+            {
+                PICO_TCP_LOG("tcp_write failed: %d\n", result);
+            }
+            break;
+        }
+        transmitRing.markSent(length);
+#if !PICO_TCP_ZERO_COPY_TRANSMIT
+        // lwIP has its own copy
+        transmitRing.release(length);
+#endif
+        queued = true;
+    }
+
+    if (queued)
+    {
+        tcp_output(controlBlock);
+    }
+}
+
+void PicoTcpClient::applyNoDelay(struct tcp_pcb *controlBlock)
+{
+    if (controlBlock == NULL)
+    {
+        return;
+    }
+    if (noDelay)
+    {
+        tcp_nagle_disable(controlBlock);
+    }
+    else
+    {
+        tcp_nagle_enable(controlBlock);
+    }
+}
+
+void PicoTcpClient::setNoDelay(bool value)
+{
+    cyw43_arch_lwip_begin();
+    noDelay = value;
+    applyNoDelay(activeBlock);
+    cyw43_arch_lwip_end();
+}
+
+bool PicoTcpClient::getNoDelay()
+{
+    return noDelay;
+}
+
+/**
+ * Discards unread data. With a connection it is also acknowledged, which
+ * tcp_close() needs: closing with unacknowledged received data sends a RST and
+ * frees the connection instead of sending FIN.
+ */
+void PicoTcpClient::dropReceived(struct tcp_pcb *controlBlock)
+{
+    if (receiveChain != NULL)
+    {
+        if (controlBlock != NULL)
+        {
+            tcp_recved(controlBlock, receiveChain->tot_len);
+        }
+        pbuf_free(receiveChain);
+        receiveChain = NULL;
+    }
+    // Data refused at PICO_TCP_RECEIVE_PBUF_LIMIT, which lwIP is holding
+    if (controlBlock != NULL && controlBlock->refused_data != NULL)
+    {
+        tcp_recved(controlBlock, controlBlock->refused_data->tot_len);
+        pbuf_free(controlBlock->refused_data);
+        controlBlock->refused_data = NULL;
+    }
+}
+
+/**
+ * Opens a connection to address and port.
+ *
+ * @return false If lwIP could not start it
+ */
+bool PicoTcpClient::startConnection()
+{
+    transmitRing.clear();
+    dropReceived(NULL);
+    isConnected = false;
+    remoteClosed = false;
+
+    struct tcp_pcb *controlBlock = tcp_new_ip_type(IP_GET_TYPE(&address));
+    if (controlBlock == NULL)
+    {
+        return false;
+    }
+
+    activeBlock = controlBlock;
+    tcp_arg(controlBlock, this);
+    tcp_recv(controlBlock, lwipReceived);
+    tcp_sent(controlBlock, lwipSent);
+    tcp_poll(controlBlock, lwipPoll, POLL_INTERVAL);
+    tcp_err(controlBlock, lwipError);
+    applyNoDelay(controlBlock);
+
+    err_t result = tcp_connect(controlBlock, &address, port, lwipConnected);
+    if (result != ERR_OK)
+    {
+        PICO_TCP_LOG("tcp_connect failed: %d\n", result);
+        activeBlock = NULL;
+        detach(controlBlock);
+        tcp_abort(controlBlock);
+        return false;
+    }
+    return true;
+}
+
+void PicoTcpClient::onDnsFound(const char *hostname, const ip_addr_t *found)
+{
+    if (!resolving || hashName(hostname) != resolvingHash)
+    {
+        // stop() was called, or this answers an older request
+        return;
+    }
+    resolving = false;
+
+    if (found == NULL)
+    {
+        // connected() stays false, so MqttClient's connect timeout reports it
+        PICO_TCP_LOG("Could not resolve %s\n", hostname);
+        return;
+    }
+    address = *found;
+    startConnection();
+}
+
+/**
+ * Moves the active connection to closing. It stays open until every committed
+ * byte has been handed to lwIP, then queues FIN, and is let go once the broker
+ * has acknowledged everything sent from the ring.
+ */
+bool PicoTcpClient::beginClose()
+{
+    struct tcp_pcb *controlBlock = activeBlock;
+    if (controlBlock == NULL)
+    {
+        return false;
+    }
+    activeBlock = NULL;
+    isConnected = false;
+    remoteClosed = false;
+
+    dropReceived(controlBlock);
+
+    if (controlBlock->state != ESTABLISHED && controlBlock->state != CLOSE_WAIT)
+    {
+        // Still connecting: nothing has been sent. tcp_close() would free a
+        // connecting pcb at once, so abort it explicitly.
+        detach(controlBlock);
+        tcp_abort(controlBlock);
+        transmitRing.clear();
+        return true;
+    }
+
+    if (closingBlock != NULL)
+    {
+        // connect() does not start a connection while one is closing, so this
+        // only guards the ring against two users
+        abortClosing();
+    }
+
+    closingBlock = controlBlock;
+    finQueued = false;
+    closePolls = 0;
+    tcp_err(controlBlock, lwipClosingError);
+    // Deliver the remaining data without waiting on Nagle
+    tcp_nagle_disable(controlBlock);
+    return advanceClose();
+}
+
+bool PicoTcpClient::advanceClose()
+{
+    struct tcp_pcb *controlBlock = closingBlock;
+    if (controlBlock == NULL)
+    {
+        return false;
+    }
+
+    if (!finQueued)
+    {
+        sendPending(controlBlock);
+        if (unsentLength() > 0)
+        {
+            // FIN goes after the last byte; wait for room in the send buffer
+            return false;
+        }
+        if (tcp_close(controlBlock) != ERR_OK)
+        {
+            // No memory to queue FIN
+            abortClosing();
+            return true;
+        }
+        finQueued = true;
+    }
+
+    if (transmitRing.unacknowledged() == 0)
+    {
+        // Nothing of ours is left for lwIP to resend; it finishes the close
+        // on its own
+        detach(controlBlock);
+        closingBlock = NULL;
+        transmitRing.clear();
+    }
+    return false;
+}
+
+void PicoTcpClient::abortClosing()
+{
+    struct tcp_pcb *controlBlock = closingBlock;
+    if (controlBlock == NULL)
+    {
+        return;
+    }
+    closingBlock = NULL;
+    detach(controlBlock);
+    tcp_abort(controlBlock);
+    transmitRing.clear();
+}
+
+err_t PicoTcpClient::onReceived(struct tcp_pcb *controlBlock, struct pbuf *payload, err_t errorCode)
+{
+    if (controlBlock != activeBlock)
+    {
+        // A closing connection: nothing reads its data any more
+        if (payload != NULL)
+        {
+            tcp_recved(controlBlock, payload->tot_len);
+            pbuf_free(payload);
+        }
         return ERR_OK;
     }
 
-    isConnecting = true;
-
-    DEBUG("sending connect to %s:%d\n", hostname, port);
-
-    ip_addr_t address;
-
-    isConfigured = false;
-    if (!ip4addr_aton(hostname, &address))
+    if (payload == NULL)
     {
-        DEBUG("Failed to configure address\n");
-        // TODO: Error Handler
-        return BASE_ERROR;
-    }
-
-    if (port < 0)
-    {
-        DEBUG("Invalid port: %d\n", port);
-        // TODO: Error Handler
-        return BASE_ERROR;
-    }
-
-    if (tcpControlBlock == NULL)
-    {
-        tcpControlBlock = tcp_new_ip_type(IP_GET_TYPE(&address));
-
-        tcpControlBlock->so_options |= SOF_KEEPALIVE;
-        tcpControlBlock->keep_idle = 5000;
-        tcpControlBlock->keep_intvl = 1000;
-
-        if (tcpControlBlock == NULL)
+        PICO_TCP_LOG("Remote closed the connection\n");
+        if (receiveChain != NULL)
         {
-            DEBUG("Failed to initialize TCP Control Block\n");
-            // TODO: Error Handler
-            return BASE_ERROR;
+            // Let the application read what arrived first; read() closes
+            remoteClosed = true;
+            return ERR_OK;
         }
-
-        tcp_arg(tcpControlBlock, this);
-        tcp_poll(tcpControlBlock, Private::client_poll, POLL_TIME_S * 2);
-        tcp_sent(tcpControlBlock, Private::client_sent);
-        tcp_recv(tcpControlBlock, Private::client_receive);
-        tcp_err(tcpControlBlock, Private::client_error);
+        return beginClose() ? ERR_ABRT : ERR_OK;
     }
 
-    err_t returnCode;
+    if (errorCode != ERR_OK)
+    {
+        tcp_recved(controlBlock, payload->tot_len);
+        pbuf_free(payload);
+        return ERR_OK;
+    }
 
-    waitingReply = true;
+    if (receiveChain != NULL &&
+        pbuf_clen(receiveChain) + pbuf_clen(payload) > PICO_TCP_RECEIVE_PBUF_LIMIT)
+    {
+        // lwIP keeps the pbuf and offers it again on its timer
+        return ERR_MEM;
+    }
+
+    // Keep lwIP's buffers; read() copies straight out of them. They are
+    // acknowledged only once read, so the chain is bounded by the TCP window.
+    if (receiveChain == NULL)
+    {
+        receiveChain = payload;
+    }
+    else
+    {
+        pbuf_cat(receiveChain, payload);
+    }
+    return ERR_OK;
+}
+
+err_t PicoTcpClient::onSent(struct tcp_pcb *controlBlock, u16_t length)
+{
+    if (controlBlock != activeBlock && controlBlock != closingBlock)
+    {
+        return ERR_OK;
+    }
+
+#if PICO_TCP_ZERO_COPY_TRANSMIT
+    // lwIP has dropped its references to the acknowledged bytes
+    transmitRing.release(length);
+#else
+    // Already released when lwIP copied them
+    (void)length;
+#endif
+
+    if (controlBlock == activeBlock)
+    {
+        sendPending(controlBlock);
+        return ERR_OK;
+    }
+    return advanceClose() ? ERR_ABRT : ERR_OK;
+}
+
+err_t PicoTcpClient::onPoll(struct tcp_pcb *controlBlock)
+{
+    if (controlBlock == activeBlock)
+    {
+        sendPending(controlBlock);
+    }
+    else if (controlBlock == closingBlock)
+    {
+        if (++closePolls >= CLOSE_POLL_LIMIT)
+        {
+            PICO_TCP_LOG("Close timed out; resetting\n");
+            abortClosing();
+            return ERR_ABRT;
+        }
+        return advanceClose() ? ERR_ABRT : ERR_OK;
+    }
+    return ERR_OK;
+}
+
+void PicoTcpClient::onError()
+{
+    activeBlock = NULL;
+    isConnected = false;
+    remoteClosed = false;
+    transmitRing.clear();
+    // The connection is gone, so there is nothing to acknowledge to
+    dropReceived(NULL);
+}
+
+void PicoTcpClient::onClosingError()
+{
+    closingBlock = NULL;
+    transmitRing.clear();
+}
+
+int PicoTcpClient::connect(const char *host, uint16_t port)
+{
+    if (host == NULL || *host == '\0')
+    {
+        return BASE_ERROR;
+    }
+
     cyw43_arch_lwip_begin();
-    returnCode = tcp_connect(tcpControlBlock, &address, port, Private::client_connected);
+
+    if (activeBlock != NULL || resolving)
+    {
+        // Already connected or connecting
+        cyw43_arch_lwip_end();
+        return BASE_ERROR;
+    }
+
+    if (closingBlock != NULL)
+    {
+        // The previous connection may still resend from the ring
+        PICO_TCP_LOG("Previous connection still closing\n");
+        cyw43_arch_lwip_end();
+        return BASE_ERROR;
+    }
+
+    this->port = port;
+    bool started = false;
+
+    if (ipaddr_aton(host, &address))
+    {
+        started = startConnection();
+    }
+    else
+    {
+#if LWIP_DNS
+        err_t result = dns_gethostbyname(host, &address, lwipDnsFound, this);
+        if (result == ERR_OK)
+        {
+            // Already cached
+            started = startConnection();
+        }
+        else if (result == ERR_INPROGRESS)
+        {
+            // onDnsFound() connects
+            resolving = true;
+            resolvingHash = hashName(host);
+            started = true;
+        }
+        else
+        {
+            PICO_TCP_LOG("DNS lookup failed to start: %d\n", result);
+        }
+#else
+        PICO_TCP_LOG("Not an IP address: %s\n", host);
+#endif
+    }
+
     cyw43_arch_lwip_end();
 
-    if (returnCode == ERR_VAL)
-    {
-        DEBUG("Invalid arguments for tcp_connect.\n");
-        return returnCode;
-    }
-    else if (returnCode != ERR_OK)
-    {
-        DEBUG("tcp_connect could not be sent, code: %d.\n", returnCode);
-        return returnCode;
-    }
-
-    return 0;
+    return started ? 1 : BASE_ERROR;
 }
 
 size_t PicoTcpClient::write(uint8_t data)
@@ -372,87 +658,105 @@ size_t PicoTcpClient::write(uint8_t data)
 
 size_t PicoTcpClient::write(const void *buffer, size_t length)
 {
-    int returnCode = 0;
-
-    err_t tcpCode;
-
-    if (writeQueue == NULL)
+    if (buffer == NULL || length == 0 || length > writable())
     {
-        writeQueue = initializeDataBuffer(buffer, length);
-
-        tcpCode = writeDataBuffer(writeQueue);
+        return 0;
     }
-    else
+
+    const uint8_t *source = (const uint8_t *)buffer;
+    size_t done = 0;
+    while (done < length)
     {
-        DataBuffer *tail = writeQueue, *next = tail->next;
-        while (next != NULL)
+        size_t contiguous = 0;
+        uint8_t *destination = writePointer(done, contiguous);
+        if (destination == NULL)
         {
-            tail = next;
-            next = tail->next;
+            return 0;
         }
-
-        tail->next = initializeDataBuffer(buffer, length);
+        size_t count = (length - done) < contiguous ? (length - done) : contiguous;
+        memcpy(destination, source + done, count);
+        done += count;
     }
+    return commit(length) ? length : 0;
+}
 
-    return 0;
+size_t PicoTcpClient::writable()
+{
+    cyw43_arch_lwip_begin();
+    // Nothing can be written without a connection to send it on
+    size_t length = (activeBlock != NULL && isConnected) ? transmitRing.writable() : 0;
+    cyw43_arch_lwip_end();
+    return length;
+}
+
+uint8_t *PicoTcpClient::writePointer(size_t offset, size_t &contiguous)
+{
+    // Free space past the committed data, which lwIP never touches, so this
+    // needs no lock. writable() only grows while it is being written.
+    return transmitRing.writePointer(offset, contiguous);
+}
+
+bool PicoTcpClient::commit(size_t length)
+{
+    cyw43_arch_lwip_begin();
+    bool accepted = activeBlock != NULL && isConnected && transmitRing.commit(length);
+    if (accepted)
+    {
+        sendPending(activeBlock);
+    }
+    cyw43_arch_lwip_end();
+    return accepted;
 }
 
 int PicoTcpClient::available()
 {
-    return availableData;
+    cyw43_arch_lwip_begin();
+    int length = (receiveChain != NULL) ? receiveChain->tot_len : 0;
+    cyw43_arch_lwip_end();
+    return length;
 }
 
 int PicoTcpClient::read(void *buffer, size_t length)
 {
-    size_t remaining, dataRead;
-    DataBuffer *queue, *temp;
-    err_t tcpCode;
-
-    uint8_t *position = (uint8_t *)buffer;
-
-    queue = receiveQueue;
-
-    dataRead = remaining = length < availableData ? length : availableData;
-
-    while (remaining > 0 && queue != NULL)
+    if (buffer == NULL || length == 0)
     {
-        if (remaining >= queue->length)
-        {
-            remaining -= queue->length;
-
-            memcpy(position, queue->position, queue->length);
-            position += queue->length;
-
-            temp = queue;
-
-            queue = queue->next;
-
-            free((void *)temp->data);
-            free(temp);
-        }
-        else
-        {
-            queue->length -= remaining;
-
-            memcpy(position, queue->position, remaining);
-
-            queue->position += remaining;
-            remaining = 0;
-        }
+        return 0;
     }
 
-    availableData -= dataRead;
+    cyw43_arch_lwip_begin();
+    if (receiveChain == NULL)
+    {
+        cyw43_arch_lwip_end();
+        return 0;
+    }
 
-    receiveQueue = queue;
+    u16_t count = (length < receiveChain->tot_len) ? (u16_t)length : receiveChain->tot_len;
+    pbuf_copy_partial(receiveChain, buffer, count, 0);
+    // Frees the pbufs read completely and moves past the rest
+    receiveChain = pbuf_free_header(receiveChain, count);
 
-    return dataRead;
+    if (activeBlock != NULL)
+    {
+        // Open the window again now that the data has been consumed
+        tcp_recved(activeBlock, count);
+        if (receiveChain == NULL && remoteClosed)
+        {
+            // The broker closed and everything it sent has been read
+            beginClose();
+        }
+    }
+    cyw43_arch_lwip_end();
+    return count;
 }
 
 void PicoTcpClient::stop()
 {
-    isConnected = false;
-    isConnecting = false;
-    close();
+    cyw43_arch_lwip_begin();
+    // A lookup in progress cannot be cancelled; its answer is ignored
+    resolving = false;
+    beginClose();
+    dropReceived(NULL);
+    cyw43_arch_lwip_end();
 }
 
 uint8_t PicoTcpClient::connected()
@@ -462,27 +766,6 @@ uint8_t PicoTcpClient::connected()
 
 void PicoTcpClient::sync()
 {
-}
-
-void PicoTcpClient::close()
-{
-    if (tcpControlBlock != NULL)
-    {
-        err_t errorCode = ERR_OK;
-
-        tcp_arg(tcpControlBlock, NULL);
-        tcp_poll(tcpControlBlock, NULL, 0);
-        tcp_sent(tcpControlBlock, NULL);
-        tcp_recv(tcpControlBlock, NULL);
-        tcp_err(tcpControlBlock, NULL);
-
-        errorCode = tcp_close(tcpControlBlock);
-        if (errorCode != ERR_OK)
-        {
-            tcp_abort(tcpControlBlock);
-        }
-        tcpControlBlock = NULL;
-    }
 #if PICO_CYW43_ARCH_POLL
     cyw43_arch_poll();
 #endif

@@ -10,10 +10,12 @@ target_include_directories(pico_garage_door PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(pico_garage_door
     pico_cyw43_arch_lwip_poll
     pico_stdlib
-    hardware_adc
     pico_sparkplug_client
     pico_ntp_client
-    pico_multicore
+    dependency_executor
+    hardware_gpio
+    elapsed_time
+    pico_wifi
 )
 
 target_compile_definitions(pico_garage_door PRIVATE
@@ -23,16 +25,10 @@ target_compile_definitions(pico_garage_door PRIVATE
     NTP_ADDRESS=\"${NTP_ADDRESS}\"
 )
 
-# ELSE()
-# target_link_libraries(pico_garage_door
-# pico_cyw43_arch_lwip_threadsafe_background
-# pico_stdlib
-# hardware_adc
-# pico_sparkplug_client
-# pico_multicore
-# )
-# ENDIF()
 pico_add_extra_outputs(pico_garage_door)
 pico_enable_stdio_usb(pico_garage_door 1)
 
 pico_enable_stdio_uart(pico_garage_door 0)
+
+# Links the OTA helper and builds picowota_pico_garage_door.uf2 for the first flash
+pico_ota_enable(pico_garage_door)
